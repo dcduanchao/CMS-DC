@@ -1,0 +1,13 @@
+services:
+  cinema:
+    build: .
+    ports:
+      - "8082:8080"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    volumes:
+      - cinema_data:/data
+    restart: unless-stopped
+volumes:
+  cinema_data:
