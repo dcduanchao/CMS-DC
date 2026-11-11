@@ -10,15 +10,15 @@ test('管理接口鉴权、来源校验、源 CRUD 和内网防护', async () =>
   const dir = await mkdtemp(path.join(os.tmpdir(),'cinema-test-'))
   const port = await new Promise(resolve => { const s = net.createServer(); s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>resolve(p))}) })
   const base = `http://127.0.0.1:${port}`
-  const start = (password,secure=false) => spawn(process.execPath,['server/index.js'],{env:{...process.env,DATA_DIR:dir,ADMIN_PASSWORD:password,PORT:String(port),HOST:'127.0.0.1',COOKIE_SECURE:String(secure)},stdio:'ignore'})
+  const start = (password,secure=false) => spawn(process.execPath,['server/index.js'],{env:{...process.env,DATA_DIR:dir,ADMIN_PASSWORD:password,SITE_PASSWORD:'site-password-long',PORT:String(port),HOST:'127.0.0.1',COOKIE_SECURE:String(secure)},stdio:'ignore'})
   let child = start('test-password-long')
   try {
     for(let i=0;i<100;i++){try{await fetch(base+'/api/health');break}catch{await new Promise(r=>setTimeout(r,50))}}
     const post=(url,body,cookie,origin=base)=>fetch(base+url,{method:'POST',headers:{'content-type':'application/json',origin,...(cookie?{cookie}:{})},body:JSON.stringify(body)})
-    assert.equal((await fetch(base+'/api/sources').then(r=>r.json())).length,0)
+    for (const path of ['/api/sources','/api/categories','/api/videos','/api/search','/api/detail','/api/session']) assert.equal((await fetch(base+path)).status,401)
     assert.equal((await post('/api/admin/sources',{name:'x',url:'http://127.0.0.1'})).status,401)
     assert.equal((await post('/api/admin/login',{password:'test-password-long'},null,'http://evil.test')).status,403)
-    const login=await post('/api/admin/login',{password:'test-password-long'});assert.equal(login.status,200);const initialCookie=login.headers.get('set-cookie');assert.match(initialCookie,/HttpOnly/i);assert.match(initialCookie,/SameSite=Strict/i);assert.doesNotMatch(initialCookie,/; Secure/i);const cookie=initialCookie.split(';')[0]
+    const login=await post('/api/admin/login',{password:'test-password-long'});assert.equal(login.status,200);const initialCookie=login.headers.get('set-cookie');assert.match(initialCookie,/HttpOnly/i);assert.match(initialCookie,/SameSite=Strict/i);assert.doesNotMatch(initialCookie,/; Secure/i);const adminCookie=initialCookie.split(';')[0];assert.equal((await fetch(base+'/api/session',{headers:{cookie:adminCookie}})).status,401);const siteLogin=await post('/api/login',{password:'site-password-long'});assert.equal(siteLogin.status,200);const siteCookie=siteLogin.headers.get('set-cookie').split(';')[0];const cookie=adminCookie+'; '+siteCookie;assert.equal((await fetch(base+'/api/admin/sources',{headers:{cookie:siteCookie}})).status,401)
     assert.equal((await fetch(base+'/api/admin/sources/export')).status,401)
     assert.equal((await post('/api/admin/sources/import',[{name:'one',url:'https://example.com/one'}])).status,401)
     assert.equal((await post('/api/admin/sources/import',[{name:'one',url:'https://example.com/one'},{name:'bad',url:'xxxx'}],cookie)).status,400)
@@ -31,18 +31,18 @@ test('管理接口鉴权、来源校验、源 CRUD 和内网防护', async () =>
     const many=Array.from({length:35},(_,i)=>({name:`source ${i}`,url:`http://127.0.0.1/${i}`}))
     assert.equal((await post('/api/admin/sources/import',many,cookie)).status,200)
     const manySources=await fetch(base+'/api/admin/sources',{headers:{cookie}}).then(r=>r.json())
-    const search=await fetch(base+'/api/search?all=1&wd=test&sourceId='+manySources[0].id)
+    const search=await fetch(base+'/api/search?all=1&wd=test&sourceId='+manySources[0].id,{headers:{cookie}})
     assert.equal(search.status,200);const searchData=await search.json();assert.equal(searchData.results.length,35);assert.deepEqual(searchData.results.map(r=>r.sourceName),many.map(s=>s.name))
     for(const s of manySources) assert.equal((await fetch(base+'/api/admin/sources/'+s.id,{method:'DELETE',headers:{origin:base,cookie}})).status,200)
     assert.equal((await post('/api/admin/test',{url:'http://127.0.0.1'},cookie)).status,400)
     const privateSource=await post('/api/admin/sources',{name:'内网测试',url:'http://127.0.0.1',enabled:false},cookie);const privateId=(await privateSource.json()).id;assert.equal((await post('/api/admin/test',{sourceId:privateId},cookie)).status,404)
     assert.equal((await fetch(base+'/api/admin/sources/'+privateId,{method:'PATCH',headers:{origin:base,cookie,'content-type':'application/json'},body:JSON.stringify({enabled:true})})).status,200);assert.equal((await post('/api/admin/test',{sourceId:privateId},cookie)).status,502);assert.equal((await fetch(base+'/api/admin/sources/'+privateId,{method:'DELETE',headers:{origin:base,cookie}})).status,200)
     const created=await post('/api/admin/sources',{name:'源 A',url:'https://example.com/api?key=secret'},cookie);assert.equal(created.status,200)
-    const publicSources=await fetch(base+'/api/sources').then(r=>r.json());assert.equal(publicSources[0].name,'源 A');assert.equal(publicSources[0].url,undefined)
+    const publicSources=await fetch(base+'/api/sources',{headers:{cookie}}).then(r=>r.json());assert.equal(publicSources[0].name,'源 A');assert.equal(publicSources[0].url,undefined)
     const id=publicSources[0].id
     assert.equal((await fetch(base+'/api/admin/sources/'+id,{method:'PATCH',headers:{origin:base,cookie,'content-type':'application/json'},body:JSON.stringify({enabled:false})})).status,200)
-    assert.deepEqual(await fetch(base+'/api/sources').then(r=>r.json()),[])
-    assert.equal((await fetch(base+'/api/videos?sourceId='+id)).status,404)
+    assert.deepEqual(await fetch(base+'/api/sources',{headers:{cookie}}).then(r=>r.json()),[])
+    assert.equal((await fetch(base+'/api/videos?sourceId='+id,{headers:{cookie}})).status,404)
     child.kill(); await new Promise(r=>child.once('exit',r)); child=start('test-password-long',true)
     for(let i=0;i<100;i++){try{await fetch(base+'/api/health');break}catch{await new Promise(r=>setTimeout(r,50))}}
     const again=await post('/api/admin/login',{password:'test-password-long'}); assert.equal(again.status,200)
@@ -61,6 +61,6 @@ test('管理接口鉴权、来源校验、源 CRUD 和内网防护', async () =>
     const invalid=await fetch(base+'/api/admin/sources/'+id,{method:'PATCH',headers:{origin:base,cookie:newCookie,'content-type':'application/json'},body:JSON.stringify({enabled:'false'})}); assert.equal(invalid.status,400)
     for(let i=0;i<5;i++)assert.equal((await post('/api/admin/login',{password:'wrong'})).status,401)
     assert.equal((await post('/api/admin/login',{password:'test-password-long'})).status,429)
-    assert.equal((await post('/api/admin/logout',{},newCookie)).status,200);assert.equal((await fetch(base+'/api/admin/sources',{headers:{cookie:newCookie}})).status,401)
+    assert.equal((await post('/api/admin/logout',{},newCookie)).status,200);assert.equal((await fetch(base+'/api/session',{headers:{cookie:newCookie}})).status,401);assert.equal((await fetch(base+'/api/admin/sources',{headers:{cookie:newCookie}})).status,401)
   } finally { child.kill(); await new Promise(r=>child.once('exit',r)); await rm(dir,{recursive:true,force:true}) }
 })

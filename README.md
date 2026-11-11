@@ -14,14 +14,14 @@
    notepad .env
    ```
 
-2. 在 `.env` 中将 `ADMIN_PASSWORD` 设置为至少 12 个字符的密码。保存文件后，构建并启动：
+2. 在 `.env` 中分别设置 `SITE_PASSWORD`（网站访问密码）和 `ADMIN_PASSWORD`（管理密码），每个密码至少 6 个字符。保存文件后，构建并启动：
 
    ```powershell
    npm run build
    npm run server
    ```
 
-3. 浏览器访问 [http://localhost:8080](http://localhost:8080)，通过右上角“源管理”登录并添加影视源。按 `Ctrl+C` 停止服务。
+3. 浏览器访问 [http://localhost:8080](http://localhost:8080)，使用 `SITE_PASSWORD` 进入，再通过右上角“源管理”使用 `ADMIN_PASSWORD` 登录并添加影视源。按 `Ctrl+C` 停止服务。
 
 服务启动时读取 `.env`，已有的系统环境变量优先。修改管理员密码后重启服务即可生效。源和代理设置保存在本地 `data/config.json`，请备份并限制该文件的读取权限。
 
@@ -35,14 +35,14 @@
 
 需要 Docker 和 Docker Compose。在项目根目录执行：
 
-1. 如果 `.env` 不存在，复制 `.env.example` 为 `.env`，将 `ADMIN_PASSWORD` 设置为至少 12 个字符的密码。可通过 `APP_PORT` 设置宿主机访问端口，默认是 `8082`。已有 `.env` 可继续使用。
+1. 如果 `.env` 不存在，复制 `.env.example` 为 `.env`，分别设置 `SITE_PASSWORD` 和 `ADMIN_PASSWORD`，每个密码至少 6 个字符。可通过 `APP_PORT` 设置宿主机访问端口，默认是 `8082`。已有 `.env` 也需要添加 `SITE_PASSWORD`。
 2. 构建并启动：
 
    ```sh
    docker compose up -d --build
    ```
 
-3. 浏览器访问 [http://localhost:8082](http://localhost:8082)（如果修改了 `APP_PORT`，请使用设置的端口），登录“源管理”并添加影视源。
+3. 浏览器访问 [http://localhost:8082](http://localhost:8082)（如果修改了 `APP_PORT`，请使用设置的端口），使用 `SITE_PASSWORD` 进入，在“源管理”中使用 `ADMIN_PASSWORD` 登录并添加影视源。
 
 常用命令：
 
@@ -57,6 +57,8 @@ docker compose down          # 停止并移除容器，保留数据卷
 正式环境应通过 Nginx 或 Caddy 提供 HTTPS，并将 `.env` 中的 `COOKIE_SECURE` 设为 `true`；反向代理需保留原始 Host。请限制管理入口访问并定期备份数据卷。
 
 ## 影视源与代理
+
+网站访问和管理使用独立密码与会话。访问密码只允许浏览，管理影视源和代理需另行输入管理密码。会话有效期为 12 小时，服务重启后需要重新登录。
 
 在“源管理”中添加、编辑和测试影视源。测试连接前需先保存并启用源。也可以通过 JSON 文件导入或导出源；导入会跳过地址重复的源，导出文件包含完整地址，请妥善保管。
 

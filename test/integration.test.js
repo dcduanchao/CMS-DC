@@ -30,18 +30,18 @@ test('苹果 CMS 模拟源贯通管理、分类、列表、搜索和详情', asy
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cinema-integration-'))
   const port = await new Promise(resolve => { const s=net.createServer(); s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>resolve(p))}) })
   const base=`http://127.0.0.1:${port}`
-  const child=spawn(process.execPath,['--import','./test/mock-network.js','server/index.js'],{env:{...process.env,DATA_DIR:dir,ADMIN_PASSWORD:'test-password-long',PORT:String(port),HOST:'127.0.0.1',MOCK_CMS_PORT:String(mock.address().port)},stdio:'ignore'})
+  const child=spawn(process.execPath,['--import','./test/mock-network.js','server/index.js'],{env:{...process.env,DATA_DIR:dir,ADMIN_PASSWORD:'test-password-long',SITE_PASSWORD:'site-password-long',PORT:String(port),HOST:'127.0.0.1',MOCK_CMS_PORT:String(mock.address().port)},stdio:'ignore'})
   try {
     for(let i=0;i<100;i++){try{await fetch(base+'/api/health');break}catch{await new Promise(r=>setTimeout(r,50))}}
     const send = (url, body, cookie) => fetch(base+url,{method:'POST',headers:{origin:base,'content-type':'application/json',...(cookie?{cookie}:{})},body:JSON.stringify(body)})
-    const login=await send('/api/admin/login',{password:'test-password-long'}); assert.equal(login.status,200); const cookie=login.headers.get('set-cookie').split(';')[0]
+    const login=await send('/api/admin/login',{password:'test-password-long'}); assert.equal(login.status,200); const adminCookie=login.headers.get('set-cookie').split(';')[0];const siteLogin=await send('/api/login',{password:'site-password-long'});const cookie=adminCookie+'; '+siteLogin.headers.get('set-cookie').split(';')[0]
     const ids=[]
     for(const source of ['a','b']) {
       const payload={name:`源 ${source}`,url:`http://${source}.mock.invalid/api.php/provide/vod/?key=secret&t=999&wd=stale&ids=999&pg=99`}
       const created=await send('/api/admin/sources',payload,cookie); assert.equal(created.status,200); ids.push((await created.json()).id)
       const connection=await send('/api/admin/test',{sourceId:ids.at(-1)},cookie); assert.equal(connection.status,200); assert.equal((await connection.json()).categoryCount,2)
     }
-    const [a,b]=ids; const get=async path=>{const r=await fetch(base+path);assert.equal(r.status,200);return r.json()}
+    const [a,b]=ids; const get=async path=>{const r=await fetch(base+path,{headers:{cookie}});assert.equal(r.status,200);return r.json()}
     const storedTest=await send('/api/admin/test',{sourceId:a},cookie);assert.equal(storedTest.status,200);assert.equal((await storedTest.json()).categoryCount,2)
     assert.deepEqual((await get(`/api/categories?sourceId=${a}`)).categories.map(x=>x.id),['1','3'])
     assert.deepEqual((await get(`/api/categories?sourceId=${b}`)).categories.map(x=>x.id),['20','30'])
@@ -51,7 +51,7 @@ test('苹果 CMS 模拟源贯通管理、分类、列表、搜索和详情', asy
     const before=calls.length; const results=await get(`/api/search?sourceId=${a}&wd=关键字&page=1`); assert.equal(results.results[0].list[0].name,'影片 A'); assert.deepEqual(calls.slice(before).map(c=>c.source),['a']); assert.equal(calls.at(-1).query.wd,'关键字')
     const detail=await get(`/api/detail?sourceId=${b}&vodId=202`); assert.equal(detail.description,'简介'); assert.equal(detail.lines.length,2); assert.equal(detail.lines[0].episodes.length,2); assert.equal(calls.at(-1).query.ids,'202')
     const all=await get(`/api/search?sourceId=${a}&wd=全站&all=1`); assert.equal(all.results.length,2)
-    const disabled=await fetch(base+'/api/admin/sources/'+a,{method:'PATCH',headers:{origin:base,cookie,'content-type':'application/json'},body:JSON.stringify({enabled:false})});assert.equal(disabled.status,200);assert.equal((await fetch(base+`/api/search?sourceId=${a}&wd=全站&all=1`)).status,404);assert.equal((await get(`/api/search?sourceId=${b}&wd=全站&all=1`)).results.length,1)
+    const disabled=await fetch(base+'/api/admin/sources/'+a,{method:'PATCH',headers:{origin:base,cookie,'content-type':'application/json'},body:JSON.stringify({enabled:false})});assert.equal(disabled.status,200);assert.equal((await fetch(base+`/api/search?sourceId=${a}&wd=全站&all=1`,{headers:{cookie}})).status,404);assert.equal((await get(`/api/search?sourceId=${b}&wd=全站&all=1`)).results.length,1)
     const testUrl=async hostname=>{const saved=await send('/api/admin/sources',{name:hostname,url:`http://${hostname}.mock.invalid/`},cookie);return send('/api/admin/test',{sourceId:(await saved.json()).id},cookie)}
     const fallback=await testUrl('c'); assert.equal(fallback.status,200); assert.equal((await fallback.json()).categoryCount,1)
     const emptyFallback=await testUrl('f'); assert.equal(emptyFallback.status,200); assert.equal((await emptyFallback.json()).categoryCount,1)
@@ -61,9 +61,9 @@ test('苹果 CMS 模拟源贯通管理、分类、列表、搜索和详情', asy
     assert.equal((await testUrl('z')).status,502);assert.equal((await fetch(base+'/api/health')).status,200)
     assert.equal((await testUrl('mixed')).status,502); assert.ok(!calls.some(c=>c.source==='m'))
     assert.equal((await testUrl('large')).status,502)
-    const malformed=await send('/api/admin/sources',{name:'缺少列表',url:'http://y.mock.invalid/'},cookie); const malformedId=(await malformed.json()).id; assert.equal((await fetch(base+`/api/videos?sourceId=${malformedId}`)).status,502)
+    const malformed=await send('/api/admin/sources',{name:'缺少列表',url:'http://y.mock.invalid/'},cookie); const malformedId=(await malformed.json()).id; assert.equal((await fetch(base+`/api/videos?sourceId=${malformedId}`,{headers:{cookie}})).status,502)
     const slow=await send('/api/admin/sources',{name:'慢源',url:'http://slow.mock.invalid/'},cookie);const slowId=(await slow.json()).id
-    const concurrent=await Promise.all(Array.from({length:80},(_,i)=>fetch(base+`/api/videos?sourceId=${slowId}&page=${i+1}`)));assert.ok(slowPeak<=8);assert.ok(concurrent.some(r=>r.status===502));assert.ok(concurrent.some(r=>r.status===200))
-    const trickle=await send('/api/admin/sources',{name:'缓慢响应源',url:'http://trickle.mock.invalid/'},cookie);const trickleId=(await trickle.json()).id;const start=Date.now();const timed=await fetch(base+`/api/videos?sourceId=${trickleId}`);assert.equal(timed.status,502);assert.ok(Date.now()-start<12000);assert.equal((await fetch(base+'/api/health')).status,200)
+    const concurrent=await Promise.all(Array.from({length:80},(_,i)=>fetch(base+`/api/videos?sourceId=${slowId}&page=${i+1}`,{headers:{cookie}})));assert.ok(slowPeak<=8);assert.ok(concurrent.some(r=>r.status===502));assert.ok(concurrent.some(r=>r.status===200))
+    const trickle=await send('/api/admin/sources',{name:'缓慢响应源',url:'http://trickle.mock.invalid/'},cookie);const trickleId=(await trickle.json()).id;const start=Date.now();const timed=await fetch(base+`/api/videos?sourceId=${trickleId}`,{headers:{cookie}});assert.equal(timed.status,502);assert.ok(Date.now()-start<12000);assert.equal((await fetch(base+'/api/health')).status,200)
   } finally { child.kill(); await new Promise(r=>child.once('exit',r)); await new Promise(r=>mock.close(r)); await rm(dir,{recursive:true,force:true}) }
 })

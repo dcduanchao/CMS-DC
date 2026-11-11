@@ -36,9 +36,9 @@ function updateConfig(mutate) {
   return operation
 }
 const configuredPassword = process.env.ADMIN_PASSWORD
-if (!config.password && !configuredPassword) throw new Error('首次启动必须设置至少 12 个字符的 ADMIN_PASSWORD')
+if (!config.password && !configuredPassword) throw new Error('首次启动必须设置至少 6 个字符的 ADMIN_PASSWORD')
 if (configuredPassword !== undefined) {
-  if (configuredPassword.length < 12) throw new Error('ADMIN_PASSWORD 必须至少 12 个字符')
+  if (configuredPassword.length < 6) throw new Error('ADMIN_PASSWORD 必须至少 6 个字符')
   const stored = config.password ? Buffer.from(config.password.hash, 'hex') : null
   const candidate = config.password ? scryptSync(configuredPassword, config.password.salt, 64) : null
   if (!stored || stored.length !== candidate.length || !timingSafeEqual(stored, candidate)) {
@@ -47,16 +47,45 @@ if (configuredPassword !== undefined) {
     await writeConfig(config)
   }
 }
-const sessions = new Map(); const attempts = new Map()
+const sitePassword = process.env.SITE_PASSWORD
+if (!config.sitePassword && !sitePassword) throw new Error('首次启动必须设置至少 6 个字符的 SITE_PASSWORD')
+if (sitePassword !== undefined) {
+  if (sitePassword.length < 6) throw new Error('SITE_PASSWORD 必须至少 6 个字符')
+  const stored = config.sitePassword ? Buffer.from(config.sitePassword.hash, 'hex') : null
+  const candidate = config.sitePassword ? scryptSync(sitePassword, config.sitePassword.salt, 64) : null
+  if (!stored || stored.length !== candidate.length || !timingSafeEqual(stored, candidate)) {
+    const salt = randomBytes(16).toString('hex')
+    config.sitePassword = { salt, hash: scryptSync(sitePassword, salt, 64).toString('hex') }
+    await writeConfig(config)
+  }
+}
+const sessions = new Map(); const attempts = new Map(); const siteSessions = new Map(); const siteAttempts = new Map()
 function auth(req, reply) { const session = sessions.get(req.cookies.session); if (!session || session.expires < Date.now()) { if (req.cookies.session) sessions.delete(req.cookies.session); reply.code(401).send({ error: '请先登录' }); return false } return true }
+function siteAuth(req, reply) { const session = siteSessions.get(req.cookies.site_session); if (!session || session.expires < Date.now()) { if (req.cookies.site_session) siteSessions.delete(req.cookies.site_session); reply.code(401).send({ error: '请先输入访问密码' }); return false } return true }
 function csrf(req, reply) { const origin = req.headers.origin; const host = req.headers.host; if (!origin || !host) { reply.code(403).send({ error: '缺少请求来源' }); return false } try { const u = new URL(origin); if (u.host !== host || !['http:', 'https:'].includes(u.protocol)) throw 0; return true } catch { reply.code(403).send({ error: '请求来源不匹配' }); return false } }
-app.addHook('onRequest', async (req, reply) => { if (['POST','PATCH','DELETE'].includes(req.method) && req.url.startsWith('/api/') && !csrf(req, reply)) return reply })
+app.addHook('onRequest', async (req, reply) => {
+  const pathname = req.url.split('?')[0]
+  if (['POST','PATCH','DELETE'].includes(req.method) && pathname.startsWith('/api/') && !csrf(req, reply)) return reply
+  if (['/api/sources','/api/categories','/api/videos','/api/search','/api/detail','/api/session'].includes(pathname) && !siteAuth(req, reply)) return reply
+})
 app.setErrorHandler((err, req, reply) => { req.log.error(err); if (err.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({error:err.message}); if (req.url.startsWith('/api/admin/sources') && req.method !== 'GET') return reply.code(500).send({error:'配置保存失败，请检查存储后重试'}); return reply.code(502).send({error:'上游请求失败，请检查源配置或稍后重试'}) })
 const fail = (reply, code, error) => reply.code(code).send({ error })
 const source = (id) => config.sources.find(s => s.id === id && s.enabled)
 const pageOf = value => Math.min(10000, Math.max(1, parseInt(value, 10) || 1))
 const cleanUrl = value => { const u = new URL(String(value)); if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) throw new Error(); return u.href }
 app.get('/api/sources', async () => config.sources.filter(s => s.enabled).map(({id,name}) => ({id,name})))
+app.get('/api/session', async () => ({ ok: true }))
+app.post('/api/login', async (req, reply) => {
+  const ip = req.ip; const now = Date.now(); const recent = (siteAttempts.get(ip) || []).filter(t => now-t < 15*60*1000)
+  if (recent.length >= 5) return fail(reply, 429, '登录尝试过多，请稍后再试')
+  recent.push(now); siteAttempts.set(ip, recent)
+  const supplied = scryptSync(String(req.body?.password || ''), config.sitePassword.salt, 64); const stored = Buffer.from(config.sitePassword.hash, 'hex')
+  if (stored.length !== supplied.length || !timingSafeEqual(stored, supplied)) return fail(reply, 401, '密码错误')
+  siteAttempts.delete(ip)
+  const token = randomBytes(32).toString('hex'); siteSessions.set(token, { expires: now + 12*60*60*1000 })
+  reply.setCookie('site_session', token, { httpOnly: true, sameSite: 'strict', secure: process.env.COOKIE_SECURE === 'true', path: '/', maxAge: 43200 })
+  return { ok: true }
+})
 async function getCategories(url, useCache = true) { let data; try { data = await upstream(url, { ac: 'list' }, useCache) } catch { data = null } if (!Array.isArray(data?.class) || !data.class.length) { try { const fallback = await upstream(url, { ac: 'videolist', pg: 1 }, useCache); if (Array.isArray(fallback.class) || !data) data = fallback } catch (error) { if (!Array.isArray(data?.class)) throw error } } return categories(data) }
 async function videoData(url, params) { const data = await upstream(url, params); if (!Array.isArray(data.list)) throw new Error('上游响应缺少影片列表'); return data }
 app.get('/api/categories', async (req, reply) => { const s = source(req.query.sourceId); if (!s) return fail(reply, 404, '源不可用'); return { sourceId: s.id, categories: await getCategories(s.url) } })
