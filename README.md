@@ -35,14 +35,14 @@
 
 需要 Docker 和 Docker Compose。在项目根目录执行：
 
-1. 如果 `.env` 不存在，复制 `.env.example` 为 `.env`，将 `ADMIN_PASSWORD` 设置为至少 12 个字符的密码。已有 `.env` 可继续使用。
+1. 如果 `.env` 不存在，复制 `.env.example` 为 `.env`，将 `ADMIN_PASSWORD` 设置为至少 12 个字符的密码。可通过 `APP_PORT` 设置宿主机访问端口，默认是 `8082`。已有 `.env` 可继续使用。
 2. 构建并启动：
 
    ```sh
    docker compose up -d --build
    ```
 
-3. 浏览器访问 [http://localhost:8082](http://localhost:8082)，登录“源管理”并添加影视源。
+3. 浏览器访问 [http://localhost:8082](http://localhost:8082)（如果修改了 `APP_PORT`，请使用设置的端口），登录“源管理”并添加影视源。
 
 常用命令：
 
@@ -52,7 +52,7 @@ docker compose restart       # 重启服务
 docker compose down          # 停止并移除容器，保留数据卷
 ```
 
-修改代码或 `.env` 后，重新执行 `docker compose up -d --build`。默认将宿主机 8082 端口映射到容器内的 8080 端口；可在 `compose.yaml` 的 `ports` 中修改宿主机端口。数据保存在 `cinema_data` 命名卷中，重建容器不会丢失配置；删除数据卷会删除配置。
+修改代码或 `.env` 后，重新执行 `docker compose up -d --build`。`APP_PORT` 指定宿主机端口，容器内部仍使用 8080 端口。数据保存在 `cinema_data` 命名卷中，重建容器不会丢失配置；删除数据卷会删除配置。
 
 正式环境应通过 Nginx 或 Caddy 提供 HTTPS，并将 `.env` 中的 `COOKIE_SECURE` 设为 `true`；反向代理需保留原始 Host。请限制管理入口访问并定期备份数据卷。
 
