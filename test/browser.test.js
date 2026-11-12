@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+﻿import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chromium } from 'playwright'
 import { spawn } from 'node:child_process'
@@ -86,3 +86,91 @@ test('浏览器经真实后端添加并切换两个模拟苹果 CMS 源', { skip
     await page.getByRole('button',{name:'源管理 ↗',exact:true}).click();page.once('dialog',dialog=>dialog.accept());await page.locator('.source-row').filter({hasText:'实链源 B'}).getByRole('button',{name:'删除'}).click();await page.waitForFunction(id=>document.querySelector('#source')?.value!==id,b);assert.equal(await page.locator('#source option').count(),1)
   } finally {await browser?.close();child.kill();await new Promise(r=>child.once('exit',r));await new Promise(r=>mock.close(r));await rm(dir,{recursive:true,force:true})}
 })
+
+test('直播管理、导入预览和 HLS 播放切换', { skip: !existsSync(browserPath) }, async () => {
+ const dir=await mkdtemp(path.join(os.tmpdir(),'live-browser-'))
+ const port=await new Promise(resolve=>{const s=net.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>resolve(p))})})
+ const base=`http://127.0.0.1:${port}`
+ const child=spawn(process.execPath,['server/index.js'],{env:{...process.env,DATA_DIR:dir,ADMIN_PASSWORD:'admin-password',SITE_PASSWORD:'site-password',PORT:String(port),HOST:'127.0.0.1'},stdio:'ignore'})
+ let browser
+ try {
+  for(let i=0;i<100;i++){try{await fetch(base+'/api/health');break}catch{await new Promise(r=>setTimeout(r,50))}}
+  browser=await chromium.launch({executablePath:browserPath,headless:true});const page=await browser.newPage()
+  await page.addInitScript(()=>{const original=HTMLMediaElement.prototype.canPlayType;HTMLMediaElement.prototype.canPlayType=function(type){return type==='application/vnd.apple.mpegurl'?'':original.call(this,type)}})
+  await page.route('**/media/*',async route=>{const name=new URL(route.request().url()).pathname.split('/').pop();const body=await readFile(path.join('test','fixtures',name));await route.fulfill({body,contentType:name.endsWith('.m3u8')?'application/vnd.apple.mpegurl':name.endsWith('.mp4')?'video/mp4':'video/mp2t'})})
+  await page.goto(base);await page.locator('#access-password').fill('site-password');await page.getByRole('button',{name:'进入'}).click();await page.getByRole('button',{name:'源管理 ↗',exact:true}).click();await page.locator('.modal input[type=password]').fill('admin-password');await page.getByRole('button',{name:'登录',exact:true}).click();await page.getByRole('button',{name:'直播源',exact:true}).click()
+  await page.route('**/api/admin/live/fetch-playlist',route=>{const url=route.request().postDataJSON().url;return route.fulfill({json:{text:url.includes('large-list')?'#EXTM3U\n'+Array.from({length:518},(_,i)=>`#EXTINF:-1,频道 ${i}\nhttps://example.com/${i}.m3u8\n`).join(''):url.endsWith('live.txt')?'河南地方,#genre#\n河南卫视,https://example.com/henan.m3u8?token=1\n':'#EXTM3U\n#EXTINF:-1,网址频道\nhttps://example.com/live.m3u8\n'}})})
+  await page.locator('#playlist-url').fill(base+'/live.txt');await page.getByRole('button',{name:'读取并预览'}).click();await page.getByText('河南卫视 · 河南地方', {exact:false}).waitFor();await page.getByRole('button',{name:'确认导入'}).click();await page.locator('.source-row').filter({hasText:'河南卫视'}).waitFor();await page.getByRole('button',{name:'删除直播源'}).click({trial:true});page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'删除直播源'}).click();await page.getByText('直播源已删除').waitFor()
+  await page.locator('#playlist-url').fill(base+'/large-list.m3u');await page.getByRole('button',{name:'读取并预览'}).click();await page.getByText('导入预览：518 个频道，已选 518 个').waitFor();await page.getByRole('button',{name:'确认导入'}).click();await page.getByText('导入完成：新增 518 个频道，跳过 0 条重复线路').waitFor();assert.equal(await page.locator('.source-row').count(),518);page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'删除直播源'}).click();await page.getByText('直播源已删除').waitFor()
+  await page.route('**/playlist.m3u',route=>route.fulfill({contentType:'audio/x-mpegurl',body:'#EXTM3U\n#EXTINF:-1,网址频道\nhttps://example.com/live.m3u8\n'}))
+  await page.locator('#playlist-url').fill(base+'/playlist.m3u');await page.getByRole('button',{name:'读取并预览'}).click();await page.getByText('网址频道', {exact:false}).waitFor();await page.getByRole('button',{name:'取消',exact:true}).click();assert.equal(await page.locator('.source-row').count(),0)
+  const input=page.locator('input[type=file][accept=".m3u,.m3u8,.txt,.json"]')
+  await input.setInputFiles({name:'invalid.json',mimeType:'application/json',buffer:Buffer.from('{invalid')});await page.getByText('JSON 格式无效').waitFor()
+  await input.setInputFiles({name:'invalid.json',mimeType:'application/json',buffer:Buffer.from('{"version":1,"channels":[null]}')});await page.getByText('第 1 项：频道格式无效').waitFor();assert.equal(await page.getByRole('button',{name:'确认导入'}).isDisabled(),true);await page.getByRole('button',{name:'取消',exact:true}).click();assert.equal(await page.locator('.source-row').count(),0)
+  await page.locator('input[type=file][accept=".m3u,.m3u8,.txt,.json"]').setInputFiles({name:'channels.m3u',mimeType:'application/vnd.apple.mpegurl',buffer:Buffer.from(`#EXTM3U\n#EXTINF:-1 group-title="新闻",频道一\n${base}/media/sample.m3u8\n#EXTINF:-1,重复频道\n${base}/media/sample.m3u8\n#EXTINF:-1,错误频道\nrelative.m3u8\n`)})
+  await page.getByText('导入预览：2 个频道，已选 2 个，1 条重复线路').waitFor();await page.getByText('第 7 行：地址或频道信息无效').waitFor();await page.getByRole('button',{name:'确认导入'}).click();await page.getByText('导入完成：新增 1 个频道，跳过 1 条重复线路').waitFor()
+  await input.setInputFiles({name:'other.m3u',mimeType:'application/vnd.apple.mpegurl',buffer:Buffer.from(`#EXTM3U\n#EXTINF:-1,频道二\n${base}/media/sample.m3u8\n#EXTINF:-1,频道二\n${base}/media/sample.mp4\n`)});await page.getByRole('button',{name:'确认导入'}).click();await page.locator('.source-row').filter({hasText:'频道二'}).waitFor();assert.equal(await page.locator('.source-row').filter({hasText:'频道一'}).count(),0)
+  await page.locator('#admin-live-source').selectOption({label:'channels.m3u'});await page.locator('.source-row').filter({hasText:'频道一'}).getByRole('button',{name:'编辑'}).click();await page.getByRole('heading',{name:'编辑频道'}).waitFor();await page.getByRole('button',{name:'添加线路'}).click();await page.locator('.live-stream').nth(1).locator('input[type=url]').fill(base+'/media/sample.mp4');await page.locator('.live-stream').nth(1).locator('select').selectOption('mp4');await page.getByRole('button',{name:'保存频道'}).click();await page.getByText('频道已保存').waitFor();await page.locator('.modal .close').click()
+  await page.getByRole('button',{name:'直播',exact:true}).click();await page.getByRole('heading',{name:'直播频道'}).waitFor();await page.locator('#live-source').selectOption({label:'channels.m3u'});const segment=page.waitForResponse(r=>r.url().endsWith('/media/segment0.ts')&&r.ok());await page.getByRole('button',{name:'频道一',exact:true}).click();await segment;await page.locator('video').evaluate(v=>v.play().catch(()=>{}));await page.waitForFunction(()=>document.querySelector('video').currentTime>0);await page.getByRole('button',{name:'线路 2',exact:true}).click();await page.waitForFunction(()=>document.querySelector('video').src.endsWith('/media/sample.mp4'));await page.getByRole('button',{name:'线路 1',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('video').src.endsWith('/media/sample.mp4'))
+  await page.getByLabel('搜索频道').fill('无匹配');await page.getByText('没有匹配的频道，请清除筛选。').waitFor();await page.getByRole('button',{name:'清除筛选'}).click();await page.locator('#live-source').selectOption({label:'other.m3u'});await page.getByRole('button',{name:'频道二',exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'频道二',exact:true}).count(),1);assert.equal(await page.getByRole('button',{name:'频道一',exact:true}).count(),0);assert.equal(await page.locator('video').count(),0);await page.getByRole('button',{name:'频道二',exact:true}).click();await page.getByRole('button',{name:'线路 2',exact:true}).click();await page.waitForFunction(()=>document.querySelector('video')?.src.endsWith('/media/sample.mp4'));await page.getByRole('button',{name:'影视',exact:true}).click();assert.equal(await page.locator('video').count(),0)
+ }finally{await browser?.close();child.kill();await new Promise(r=>child.once('exit',r));await rm(dir,{recursive:true,force:true})}
+})
+
+
+
+
+test('直播原生 HLS 分支与自动播放受限提示', { skip: !existsSync(browserPath) }, async () => {
+ const dir=await mkdtemp(path.join(os.tmpdir(),'live-native-'))
+ const port=await new Promise(resolve=>{const s=net.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>resolve(p))})})
+ const base=`http://127.0.0.1:${port}`
+ const child=spawn(process.execPath,['server/index.js'],{env:{...process.env,DATA_DIR:dir,ADMIN_PASSWORD:'admin-password',SITE_PASSWORD:'site-password',PORT:String(port),HOST:'127.0.0.1'},stdio:'ignore'})
+ let browser
+ try {
+  for(let i=0;i<100;i++){try{await fetch(base+'/api/health');break}catch{await new Promise(r=>setTimeout(r,50))}}
+  browser=await chromium.launch({executablePath:browserPath,headless:true});const page=await browser.newPage();let chunkCount=0
+  await page.addInitScript(()=>{const original=HTMLMediaElement.prototype.canPlayType;HTMLMediaElement.prototype.canPlayType=function(type){return type==='application/vnd.apple.mpegurl'?'probably':original.call(this,type)};HTMLMediaElement.prototype.play=function(){return Promise.reject(new DOMException('blocked','NotAllowedError'))}})
+  await page.route('**/assets/hls-*.js',async route=>{chunkCount++;await route.continue()})
+  await page.route('**/api/**',async route=>{const p=new URL(route.request().url()).pathname;if(p==='/api/session')return route.fulfill({json:{ok:true}});if(p==='/api/sources')return route.fulfill({json:[]});if(p==='/api/live/sources')return route.fulfill({json:[{id:'test',name:'测试源'}]});if(p==='/api/live/channels')return route.fulfill({json:[{id:'c',name:'原生频道',group:'',streams:[{id:'s',name:'主线',type:'hls',url:base+'/media/live.m3u8'}]}]});return route.continue()})
+  await page.goto(base);await page.getByRole('button',{name:'直播',exact:true}).click();await page.locator('#live-source').selectOption('test');await page.getByRole('button',{name:'原生频道'}).click();await page.getByText('请点击播放器的播放按钮开始观看').waitFor();assert.equal(await page.locator('video').getAttribute('src'),base+'/media/live.m3u8');assert.equal(chunkCount,0)
+  await page.evaluate(()=>{HTMLMediaElement.prototype.play=function(){return Promise.reject(new DOMException('unsupported','NotSupportedError'))}});await page.getByRole('button',{name:'重试'}).click();await page.getByText('播放失败，请检查资源和浏览器支持，或切换线路').waitFor();assert.equal(await page.getByText('请点击播放器的播放按钮开始观看').count(),0)
+ }finally{await browser?.close();child.kill();await new Promise(r=>child.once('exit',r));await rm(dir,{recursive:true,force:true})}
+})
+
+test('直播快速切换时延迟加载的 HLS 不覆盖当前频道', { skip: !existsSync(browserPath) }, async () => {
+ const dir=await mkdtemp(path.join(os.tmpdir(),'live-race-'))
+ const port=await new Promise(resolve=>{const s=net.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>resolve(p))})})
+ const base=`http://127.0.0.1:${port}`
+ const child=spawn(process.execPath,['server/index.js'],{env:{...process.env,DATA_DIR:dir,ADMIN_PASSWORD:'admin-password',SITE_PASSWORD:'site-password',PORT:String(port),HOST:'127.0.0.1'},stdio:'ignore'})
+ let browser,release
+ try {
+  for(let i=0;i<100;i++){try{await fetch(base+'/api/health');break}catch{await new Promise(r=>setTimeout(r,50))}}
+  browser=await chromium.launch({executablePath:browserPath,headless:true});const page=await browser.newPage()
+  await page.addInitScript(()=>{const original=HTMLMediaElement.prototype.canPlayType;HTMLMediaElement.prototype.canPlayType=function(type){return type==='application/vnd.apple.mpegurl'?'':original.call(this,type)}})
+  let notify;const requested=new Promise(r=>notify=r),gate=new Promise(r=>release=r)
+  await page.route('**/assets/hls-*.js',async route=>{notify();await gate;await route.continue()})
+  await page.route('**/media/*',async route=>{const name=new URL(route.request().url()).pathname.split('/').pop();const body=await readFile(path.join('test','fixtures',name));await route.fulfill({body,contentType:name.endsWith('.mp4')?'video/mp4':name.endsWith('.m3u8')?'application/vnd.apple.mpegurl':'video/mp2t'})})
+  await page.route('**/api/**',async route=>{const p=new URL(route.request().url()).pathname;if(p==='/api/session')return route.fulfill({json:{ok:true}});if(p==='/api/sources')return route.fulfill({json:[]});if(p==='/api/live/sources')return route.fulfill({json:[{id:'test',name:'测试源'}]});if(p==='/api/live/channels')return route.fulfill({json:[{id:'h',name:'HLS 频道',group:'',streams:[{id:'hs',name:'主线',type:'hls',url:base+'/media/sample.m3u8'}]},{id:'m',name:'MP4 频道',group:'',streams:[{id:'ms',name:'主线',type:'mp4',url:base+'/media/sample.mp4'}]}]});return route.continue()})
+  await page.goto(base);await page.getByRole('button',{name:'直播',exact:true}).click();await page.locator('#live-source').selectOption('test');await page.getByRole('button',{name:'HLS 频道'}).click();await Promise.race([requested,new Promise((_,reject)=>setTimeout(()=>reject(Error('未请求 HLS 模块')),5000))]);await page.getByRole('button',{name:'MP4 频道'}).click();await page.waitForFunction(()=>document.querySelector('video')?.src.endsWith('/media/sample.mp4'))
+  const response=page.waitForResponse(r=>/\/assets\/hls-.*\.js/.test(r.url())&&r.ok());release();await response;await page.locator('video').evaluate(v=>v.play().catch(()=>{}));await page.waitForFunction(()=>document.querySelector('video').currentTime>0);assert.match(await page.locator('video').getAttribute('src'),/sample\.mp4$/);assert.equal(await page.getByRole('heading',{name:'MP4 频道'}).count(),1)
+ }finally{release?.();await browser?.close();child.kill();await new Promise(r=>child.once('exit',r));await rm(dir,{recursive:true,force:true})}
+})
+
+test('直播 HLS 持续刷新播放列表并请求更新的分片', { skip: !existsSync(browserPath) }, async () => {
+ const dir=await mkdtemp(path.join(os.tmpdir(),'live-refresh-'))
+ const port=await new Promise(resolve=>{const s=net.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>resolve(p))})})
+ const base=`http://127.0.0.1:${port}`
+ const child=spawn(process.execPath,['server/index.js'],{env:{...process.env,DATA_DIR:dir,ADMIN_PASSWORD:'admin-password',SITE_PASSWORD:'site-password',PORT:String(port),HOST:'127.0.0.1'},stdio:'ignore'})
+ let browser
+ try {
+  for(let i=0;i<100;i++){try{await fetch(base+'/api/health');break}catch{await new Promise(r=>setTimeout(r,50))}}
+  browser=await chromium.launch({executablePath:browserPath,headless:true});const page=await browser.newPage();let manifests=0,segments=0
+  await page.addInitScript(()=>{const original=HTMLMediaElement.prototype.canPlayType;HTMLMediaElement.prototype.canPlayType=function(type){return type==='application/vnd.apple.mpegurl'?'':original.call(this,type)}})
+  await page.route('**/live-media/**',async route=>{const p=new URL(route.request().url()).pathname;if(p.endsWith('.m3u8')){const n=manifests++;return route.fulfill({body:`#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:${n}\n#EXTINF:2.0,\nsegment${n}.ts\n`,contentType:'application/vnd.apple.mpegurl'})}segments++;return route.fulfill({body:await readFile(path.join('test','fixtures','segment0.ts')),contentType:'video/mp2t'})})
+  await page.route('**/api/**',async route=>{const p=new URL(route.request().url()).pathname;if(p==='/api/session')return route.fulfill({json:{ok:true}});if(p==='/api/sources')return route.fulfill({json:[]});if(p==='/api/live/sources')return route.fulfill({json:[{id:'test',name:'测试源'}]});if(p==='/api/live/channels')return route.fulfill({json:[{id:'l',name:'测试直播',group:'',streams:[{id:'s',name:'主线',type:'hls',url:base+'/live-media/channel.m3u8'}]}]});return route.continue()})
+  await page.goto(base);await page.getByRole('button',{name:'直播',exact:true}).click();await page.locator('#live-source').selectOption('test');await page.getByRole('button',{name:'测试直播'}).click();await page.waitForFunction(()=>document.querySelector('video')?.currentTime>0,{timeout:10000});await page.waitForResponse(r=>r.url().endsWith('segment1.ts')&&r.ok(),{timeout:15000});assert.ok(manifests>=2);assert.ok(segments>=2)
+ }finally{await browser?.close();child.kill();await new Promise(r=>child.once('exit',r));await rm(dir,{recursive:true,force:true})}
+})
+
+
+
+

@@ -45,7 +45,7 @@ async function proxyTunnel(proxyUrl, address, port) {
     req.end()
   })
 }
-async function fetchSafe(url, redirects = 0, proxyUrl = '') {
+async function fetchSafe(url, redirects = 0, proxyUrl = '', textMode = false) {
   const u = new URL(url)
   if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) throw new Error('仅支持不含用户信息的 HTTP(S) 地址')
   const hostname = u.hostname.startsWith('[') ? u.hostname.slice(1, -1) : u.hostname
@@ -58,12 +58,12 @@ async function fetchSafe(url, redirects = 0, proxyUrl = '') {
     agent.createConnection = () => u.protocol === 'https:' ? tls.connect({ socket, servername: net.isIP(hostname) ? undefined : hostname }) : socket
   }
   return new Promise((resolve, reject) => {
-    const req = (u.protocol === 'https:' ? https : http).get(u, { agent, lookup: pinnedLookup(addresses), autoSelectFamily: true, headers: { accept: 'application/json', 'user-agent': 'LightCinema/1.0' } }, res => {
-      if ([301,302,303,307,308].includes(res.statusCode)) { res.resume(); if (!res.headers.location || redirects >= 3) return reject(new Error('上游重定向无效或过多')); let target; try { target = new URL(res.headers.location, u).href } catch { return reject(new Error('上游重定向地址无效')) } return resolve(fetchSafe(target, redirects + 1, proxyUrl)) }
+    const req = (u.protocol === 'https:' ? https : http).get(u, { agent, lookup: pinnedLookup(addresses), autoSelectFamily: true, headers: { accept: textMode ? '*/*' : 'application/json', 'user-agent': 'LightCinema/1.0' } }, res => {
+      if ([301,302,303,307,308].includes(res.statusCode)) { res.resume(); if (!res.headers.location || redirects >= 3) return reject(new Error('上游重定向无效或过多')); let target; try { target = new URL(res.headers.location, u).href } catch { return reject(new Error('上游重定向地址无效')) } return resolve(fetchSafe(target, redirects + 1, proxyUrl, textMode)) }
       if (res.statusCode !== 200) { res.resume(); return reject(new Error(`上游返回 HTTP ${res.statusCode}`)) }
       let size = 0; const chunks = []
-      res.on('data', chunk => { size += chunk.length; if (size > 2 * 1024 * 1024) req.destroy(new Error('上游响应过大')); else chunks.push(chunk) })
-      res.on('end', () => { try { const data = JSON.parse(Buffer.concat(chunks).toString('utf8')); if (!data || typeof data !== 'object' || (!Array.isArray(data.list) && !Array.isArray(data.class))) throw new Error(); resolve(data) } catch { reject(new Error('上游未返回有效的苹果 CMS JSON')) } })
+      res.on('data', chunk => { size += chunk.length; if (size > (textMode ? 1024 * 1024 : 2 * 1024 * 1024)) req.destroy(new Error('上游响应过大')); else chunks.push(chunk) })
+      res.on('end', () => { if (textMode) return resolve(Buffer.concat(chunks).toString('utf8')); try { const data = JSON.parse(Buffer.concat(chunks).toString('utf8')); if (!data || typeof data !== 'object' || (!Array.isArray(data.list) && !Array.isArray(data.class))) throw new Error(); resolve(data) } catch { reject(new Error('上游未返回有效的苹果 CMS JSON')) } })
       res.on('error', reject)
     })
     const deadline = setTimeout(() => req.destroy(new Error('上游请求超时')), 8000)
@@ -71,6 +71,10 @@ async function fetchSafe(url, redirects = 0, proxyUrl = '') {
     req.setTimeout(8000, () => req.destroy(new Error('上游请求超时')))
     req.on('error', reject)
   })
+}
+export async function fetchPlaylist(url, proxyUrl = '') {
+  await acquire()
+  try { return await fetchSafe(url, 0, proxyUrl, true) } finally { release() }
 }
 const cache = new ResponseCache()
 export async function upstream(base, params, useCache = true, logger, proxyUrl = '') {

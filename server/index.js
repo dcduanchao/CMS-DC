@@ -1,11 +1,12 @@
 import Fastify from 'fastify'
+import { registerLive } from './live.js'
 import cookie from '@fastify/cookie'
 import fastifyStatic from '@fastify/static'
 import { randomBytes, scryptSync, timingSafeEqual, randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
-import { upstream as fetchUpstream, categories, listing, detail } from './upstream.js'
+import { upstream as fetchUpstream, fetchPlaylist, categories, listing, detail } from './upstream.js'
 
 // Node preserves variables already provided by the process environment.
 try { process.loadEnvFile(path.resolve('.env')) } catch (error) { if (error.code !== 'ENOENT') throw error }
@@ -17,7 +18,7 @@ const dataDir = path.resolve(process.env.DATA_DIR || './data'); await mkdir(data
 const configFile = path.join(dataDir, 'config.json')
 let config
 try { config = JSON.parse(await readFile(configFile, 'utf8')) } catch (e) { if (e.code !== 'ENOENT') throw e; config = { sources: [] } }
-if (!Array.isArray(config.sources)) throw new Error('配置文件无效')
+if (!Array.isArray(config.sources) || (config.liveChannels !== undefined && !Array.isArray(config.liveChannels)) || (config.liveSources !== undefined && !Array.isArray(config.liveSources))) throw new Error('配置文件无效')
 let writing = Promise.resolve()
 async function writeConfig(next) {
   const tmp = `${configFile}.${randomUUID()}.tmp`
@@ -66,9 +67,9 @@ function csrf(req, reply) { const origin = req.headers.origin; const host = req.
 app.addHook('onRequest', async (req, reply) => {
   const pathname = req.url.split('?')[0]
   if (['POST','PATCH','DELETE'].includes(req.method) && pathname.startsWith('/api/') && !csrf(req, reply)) return reply
-  if (['/api/sources','/api/categories','/api/videos','/api/search','/api/detail','/api/session'].includes(pathname) && !siteAuth(req, reply)) return reply
+  if (['/api/sources','/api/categories','/api/videos','/api/search','/api/detail','/api/session','/api/live/channels','/api/live/sources'].includes(pathname) && !siteAuth(req, reply)) return reply
 })
-app.setErrorHandler((err, req, reply) => { req.log.error(err); if (err.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({error:err.message}); if (req.url.startsWith('/api/admin/sources') && req.method !== 'GET') return reply.code(500).send({error:'配置保存失败，请检查存储后重试'}); return reply.code(502).send({error:'上游请求失败，请检查源配置或稍后重试'}) })
+app.setErrorHandler((err, req, reply) => { req.log.error(err); if (err.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({error:err.message}); if ((req.url.startsWith('/api/admin/sources') || req.url.startsWith('/api/admin/live')) && req.method !== 'GET') return reply.code(500).send({error:'配置保存失败，请检查存储后重试'}); return reply.code(502).send({error:'上游请求失败，请检查源配置或稍后重试'}) })
 const fail = (reply, code, error) => reply.code(code).send({ error })
 const source = (id) => config.sources.find(s => s.id === id && s.enabled)
 const pageOf = value => Math.min(10000, Math.max(1, parseInt(value, 10) || 1))
@@ -107,6 +108,13 @@ app.get('/api/search', async (req, reply) => {
 })
 app.get('/api/detail', async (req, reply) => { const s = source(req.query.sourceId); if (!s) return fail(reply, 404, '源不可用'); const id = String(req.query.vodId || '').slice(0, 200); if (!id) return fail(reply, 400, '缺少影片 ID'); const data = await videoData(s.url, { ac: 'videolist', ids: id }); const v = data.list.find(x => x && String(x.vod_id) === id); if (!v) return fail(reply, 404, '未找到影片'); return { sourceId: s.id, ...detail(v) } })
 app.post('/api/admin/login', async (req, reply) => { const ip = req.ip; const now = Date.now(); const a = attempts.get(ip) || []; const recent = a.filter(t => now-t < 15*60*1000); if (recent.length >= 5) return fail(reply, 429, '登录尝试过多，请稍后再试'); recent.push(now); attempts.set(ip, recent); const supplied = scryptSync(String(req.body?.password || ''), config.password.salt, 64); const stored = Buffer.from(config.password.hash, 'hex'); if (stored.length !== supplied.length || !timingSafeEqual(stored, supplied)) return fail(reply, 401, '密码错误'); attempts.delete(ip); const token = randomBytes(32).toString('hex'); sessions.set(token, { expires: now + 12*60*60*1000 }); reply.setCookie('session', token, { httpOnly: true, sameSite: 'strict', secure: process.env.COOKIE_SECURE === 'true', path: '/', maxAge: 43200 }); return { ok: true } })
+app.post('/api/admin/live/fetch-playlist', async (req, reply) => {
+  if (!auth(req, reply)) return
+  let url
+  try { if (typeof req.body?.url !== 'string' || req.body.url.length > 4096) throw 0; url = cleanUrl(req.body.url) } catch { return fail(reply, 400, '请输入有效的 HTTP(S) 播放列表地址') }
+  try { const text = await fetchPlaylist(url, config.proxy?.enabled ? config.proxy.url : ''); reply.header('Cache-Control', 'no-store'); return { text } }
+  catch { return fail(reply, 502, '读取列表失败，请检查地址、网络或服务器代理设置') }
+})
 app.post('/api/admin/logout', async (req, reply) => { sessions.delete(req.cookies.session); reply.clearCookie('session', { path: '/' }); return { ok: true } })
 app.get('/api/admin/sources', async (req, reply) => { if (!auth(req, reply)) return; return config.sources.map(({id,name,enabled,createdAt}) => ({id,name,enabled,createdAt})) })
 app.get('/api/admin/sources/export', async (req, reply) => {
@@ -153,6 +161,7 @@ app.post('/api/admin/test', async (req, reply) => { if (!auth(req, reply)) retur
 app.post('/api/admin/sources', async (req, reply) => { if (!auth(req, reply)) return; let url; try { url = cleanUrl(req.body?.url) } catch { return fail(reply, 400, '请输入有效的 HTTP(S) 地址') } const name = String(req.body?.name || '').trim().slice(0, 80); if (!name) return fail(reply, 400, '请输入源名称'); if (req.body?.enabled != null && typeof req.body.enabled !== 'boolean') return fail(reply, 400, '启用状态必须是布尔值'); const s = { id: randomUUID(), name, url, enabled: req.body?.enabled !== false, createdAt: new Date().toISOString() }; await updateConfig(next => next.sources.push(s)); return { id: s.id } })
 app.patch('/api/admin/sources/:id', async (req, reply) => { if (!auth(req, reply)) return; if (req.body?.enabled != null && typeof req.body.enabled !== 'boolean') return fail(reply, 400, '启用状态必须是布尔值'); await updateConfig(next => { const s = next.sources.find(x => x.id === req.params.id); if (!s) throw Object.assign(new Error('源不存在'), {statusCode:404}); let url; try { url = cleanUrl(req.body?.url ?? s.url) } catch { throw Object.assign(new Error('请输入有效的 HTTP(S) 地址'), {statusCode:400}) } const name = String(req.body?.name ?? s.name).trim().slice(0, 80); if (!name) throw Object.assign(new Error('请输入源名称'), {statusCode:400}); Object.assign(s, { name, url, enabled: req.body?.enabled ?? s.enabled }) }); return { ok: true } })
 app.delete('/api/admin/sources/:id', async (req, reply) => { if (!auth(req, reply)) return; await updateConfig(next => { const i = next.sources.findIndex(x => x.id === req.params.id); if (i < 0) throw Object.assign(new Error('源不存在'), {statusCode:404}); next.sources.splice(i, 1) }); return { ok: true } })
+registerLive(app, { auth, updateConfig, getConfig: () => config })
 app.get('/api/health', async () => ({ ok: true }))
 if (existsSync(path.resolve('dist/index.html'))) await app.register(fastifyStatic, { root: path.resolve('dist'), prefix: '/' })
 await app.listen({ port: Number(process.env.PORT || 8080), host: process.env.HOST || '0.0.0.0' })
